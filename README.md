@@ -9,7 +9,7 @@ Requires `pickle` (built-in), `NumPy` and `osgeo` modules.
 
 ## Usage
 
-Right now, input and output files and various parameters are hard coded in `makeply.py` . Make changes as desired and then simply run
+Right now, input and output files and various parameters are hard coded in `makeply.py` . The expected input data is currently undocumented but should not be too difficult to figure out. Make changes as desired and then simply run
 
     ./makeply.py
    
