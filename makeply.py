@@ -6,8 +6,7 @@
 import pickle
 import numpy as np
 
-# for reprojection
-from osgeo import ogr,osr
+import math
 
 inputFileName = '20220901_flight2_full_upsample10.pickle'
 outputFileName = 'scratch.ply'
@@ -37,15 +36,6 @@ localOriginLon = np.nan
 
 # --- local functions ---
 
-# make local reference system
-def make_local_reference():
-    if np.isnan(localOriginLat) or np.isnan(localOriginLon):
-        return None
-    sr = osr.SpatialReference()
-    projection = '+proj=ortho +lat_0=%0.7f +lon_0=%0.7f +datum=WGS84 +units=m +no_defs ' % (localOriginLat, localOriginLon)
-    sr.ImportFromProj4(projection)
-    return sr
-
 # convert return power to RGBA color
 # we just clamp to desired range and convert to greyscale.
 def rp_to_color(power):
@@ -55,27 +45,40 @@ def rp_to_color(power):
         scaled = 0
     if scaled > 1:
         scaled = 1
-    return (scaled * 255, scaled * 255, scaled * 255, 255)
+    return (scaled * 255, scaled * 255, scaled * 255)
 
-coordTransform = None
 
-# reproject lat/lon to local meters (ignoring Z values)
+# directly coded orthographic projection based on EPSG:
 def reproject(lat, lon):
-    # calculate coordinate transform on first run only
-    if coordTransform is None:
-        if np.isnan(lat) or np.isnan(lon):
-            return [None, None]
-        source = osr.SpatialReference()
-        source.ImportFromEPSG(4326)
+    # semi-major axis
+    a = 6378137
+    # semi-minor axis
+    # inverse flattening
+    f1 =  298.2572236
+    # eccentricity of the ellipsoid
+    e = 0.081819191
+    # projection origin latitude / longitude
+    phi0 = localOriginLat * math.pi / 180
+    lamda0 = localOriginLon * math.pi / 180
+    phi = lat * math.pi / 180
+    lamda = lon * math.pi / 180
 
-        coordTransform = osr.CoordinateTransformation(source, localSpatialReference)
+    e2 = e*e
 
-    return coordTransform.TransformPoint(lat, lon, 0)[:2]
+    # prime verical radius of curvature at phi
+    v = a / math.sqrt(1 - e2*math.sin(phi)*math.sin(phi))
+    v0 = a / math.sqrt(1 - e2*math.sin(phi0)*math.sin(phi0))
+
+    # calculate easting and northing
+    easting = v*math.cos(phi)*math.sin(lamda - lamda0)
+    northing = v*(math.sin(phi)*math.cos(phi0)-math.cos(phi)*math.sin(phi0)*math.cos(lamda-lamda0))
+
+    northing = northing + e2*(v0 * math.sin(phi0) - v*math.sin(phi))*math.cos(phi0)
+
+    return ([easting, northing])
 
 
 # === main code ===
-
-localSpatialReference = make_local_reference()
 
 print("loading pickle from",inputFileName)
 
@@ -105,21 +108,20 @@ print(timeStepCount, "time steps, using range bins", dtrmin, "-", dtrmax)
 plyVertices = []
 plyFaces = []
 
-lat0 = np.nan
-lon0 = np.nan
-
-
 print("building geometry ...")
 
 # easy cheat to make building geometry and indexing into the vertex array easier
 lastBaseIndex = -1
 
 for i in range(timeStepCount):
+
+    # early break if we don't have data here
+    if np.isnan(data['lat'][i]):
+        continue
     
-    if localSpatialReference is None and not np.isnan(data['lat'][i]):
+    if np.isnan(localOriginLat):
         localOriginLat = data['lat'][i]
         localOriginLon = data['lon'][i]
-        localSpatialReference = make_local_reference()
 
     
  #   lat = (data['lat'][i] - lat0) * latitudeScale
@@ -127,7 +129,7 @@ for i in range(timeStepCount):
     (x, y) = reproject(data['lat'][i], data['lon'][i])
     
     # skip samples with invalid positioning
-    if x is None or y is None:
+    if np.isnan(x) or np.isnan(y):
         continue
         
     baseAltitude = data['alt_rel'][i]
@@ -135,7 +137,10 @@ for i in range(timeStepCount):
 
     for d in range(dtrmin, dtrmax):
         rp = data["return_power"][d, i]
-        plyVertices.append( { "v": ( horizontalScale * x, horizontalScale * y, verticalScale * (baseAltitude - dtr[d])), "color": rp_to_color(rp) } )
+        plyVertices.append( { 
+            "v": ( horizontalScale * x, horizontalScale * y, verticalScale * (baseAltitude - dtr[d])), 
+            "color": rp_to_color(rp),
+            "returnPower": rp } )
 
     # only start adding faces if we have at least two columns of vertices
     if lastBaseIndex >= 0:
@@ -163,7 +168,7 @@ with open(outputFileName, "wb") as file:
         b"property uchar red\n"
         b"property uchar green\n"
         b"property uchar blue\n"
-        b"property uchar alpha\n"
+        b"property float returnPower\n"
     )
     
     fw(b"element face %d\n" % len(plyFaces))
@@ -176,7 +181,8 @@ with open(outputFileName, "wb") as file:
     print(" ... vertex data ...")
     for v in plyVertices:
         fw(b"%.6f %.6f %.6f" % v['v'][:])
-        fw(b" %u %u %u %u" % v['color'][:])
+        fw(b" %u %u %u" % v['color'][:])
+        fw(b" %.4f" % v['returnPower'])
         fw(b"\n")
     
     # Face data
